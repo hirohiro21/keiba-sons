@@ -109,6 +109,479 @@ input[type=number]{background:var(--bg3);border:1px solid var(--bd2);border-radi
 </div>
 
 <script>
+function getRace(day,r){
+  const race=day.races[r];
+  if(!race||!race.rows.length)return null;
+  const s=[...race.rows].sort((a,b)=>a.ord-b.ord);
+  return{uma:s.map(x=>x.num),frames:s.map(x=>x.frame),kura:race.kura.length?race.kura:[0,0],pop1:race.pop1||0,pop2:race.pop2||0,pop3:race.pop3||0};
+}
+
+function popGroup(p){if(!p)return'?';if(p<=3)return'A';if(p<=8)return'B';return'C';}
+function popBadge(g){return`<span class="bdg ${g==='A'?'pop-a':g==='B'?'pop-b':g==='C'?'pop-c':''}">${g}群</span>`;}
+
+function parseText(txt){
+  const days=[];
+  let curDay=null, curRace=null, inResultTable=false;
+
+  const lines=txt.split('\n');
+
+  for(let i=0;i<lines.length;i++){
+    const l=lines[i].trim();
+    if(!l)continue;
+
+    // ===== ノイズスキップ =====
+    if(l.match(/^\d+\/\d+/))continue;
+    if(l.match(/^（[日月火水木金土]）/))continue;
+    if(l.match(/競馬場$/)&&l.length<=10)continue;
+    if(l==='競馬日程')continue;
+    if(l==='競馬結果・払戻金一覧')continue;
+    // ===== 日付検出（ノイズより先に処理）=====
+    const dm=l.match(/(\d{4}年\d+月\d+日)/);
+    if(dm){
+      if(curDay)days.push(curDay);
+      curDay={date:dm[1],races:{}};
+      curRace=null;inResultTable=false;continue;
+    }
+
+    // ===== ノイズスキップ（日付検出の後）=====
+    if(l.match(/^\[中央競馬.*\]\(http/))continue;
+    if(l.match(/^> \d{4}年/))continue;
+    if(l.match(/^WIN5[\s\t]+[－\-][\s\t]+[－\-]/))continue;
+    if(l.match(/^的中\d+件/))continue;
+    if(l.match(/^東京$|^中山$|^阪神$|^京都$|^中京$|^小倉$|^函館$|^札幌$|^新潟$|^福島$/))continue;
+
+    // ===== ★レース番号検出（最強化）=====
+    // 対応: "11R", "11R WIN5", "11RWIN5", "11R\t霜月S", 等
+    const rm=l.match(/^(\d{1,2})R/);
+    if(rm){
+      const rn=parseInt(rm[1]);
+      if(rn>=1&&rn<=12){
+        if(!curDay)curDay={date:'当日',races:{}};
+        curRace={n:rn,rows:[],kura:[],pop1:0,pop2:0,pop3:0};
+        curDay.races[rn]=curRace;
+        inResultTable=false;
+      }
+      continue;
+    }
+
+    if(!curRace)continue;
+
+    // ===== テーブル制御 =====
+    if(l==='レース結果'){inResultTable=true;continue;}
+    if(l==='払戻金'||l==='結果払戻'||l.startsWith('結果払戻')||l==='¥ 払戻金'){inResultTable=false;continue;}
+    if(l.includes('着順')&&l.includes('枠')&&l.includes('馬番'))continue;
+
+    // ===== 結果テーブル =====
+    if(inResultTable){
+      const t=l.split('\t');
+      if(t.length>=3){
+        const ord=parseInt(t[0]),frame=parseInt(t[1]),num=parseInt(t[2]);
+        if(!isNaN(ord)&&!isNaN(frame)&&!isNaN(num)&&
+           ord>=1&&ord<=3&&frame>=1&&frame<=8&&num>=1&&num<=18){
+          if(!curRace.rows.find(r=>r.ord===ord))
+            curRace.rows.push({ord,frame,num});
+        }
+      }
+      continue;
+    }
+
+    // ===== 払戻セクション =====
+    if(!inResultTable&&curRace){
+      const km=l.match(/^枠連[\t\s]+(\d+)[－\-](\d+)/);
+      if(km&&!curRace.kura.length){
+        const a=parseInt(km[1]),b=parseInt(km[2]);
+        if(a>=1&&a<=8&&b>=1&&b<=8)curRace.kura=[Math.min(a,b),Math.max(a,b)];
+        continue;
+      }
+      const tm=l.match(/^単勝[\t\s]+\d+[\t\s]+[\d,]+円[\t\s]+(\d+)番人気/);
+      if(tm&&!curRace.pop1){curRace.pop1=parseInt(tm[1]);continue;}
+      // 複勝から2着・3着人気を抽出（「X番人気」単独行）
+      const popLineM=l.match(/^(\d+)番人気$/);
+      if(popLineM){
+        const p=parseInt(popLineM[1]);
+        if(!curRace.pop2)curRace.pop2=p;
+        else if(!curRace.pop3)curRace.pop3=p;
+        continue;
+      }
+    }
+  }
+  if(curDay)days.push(curDay);
+
+  // 枠連フォールバック
+  days.forEach(day=>{
+    Object.values(day.races).forEach(race=>{
+      if(!race.kura.length&&race.rows.length>=2){
+        const s=[...race.rows].sort((a,b)=>a.ord-b.ord);
+        if(s[0].frame&&s[1].frame)
+          race.kura=[Math.min(s[0].frame,s[1].frame),Math.max(s[0].frame,s[1].frame)];
+      }
+    });
+  });
+
+  return days;
+}
+
+function analyzeBrother(day,maxR){
+  const groups=[[1,4,7,10],[2,5,8,11],[3,6,9,12]];
+  const names=['左列(1-4-7-10R)','中列(2-5-8-11R)','右列(3-6-9-12R)'];
+  return groups.map((grp,gi)=>{
+    const avail=grp.filter(r=>r<=maxR&&getRace(day,r));
+    const allUma=avail.map(r=>getRace(day,r).uma);
+    const allKura=avail.map(r=>getRace(day,r).kura);
+    const chains=[];
+    for(let i=0;i<avail.length-1;i++){
+      const common=allUma[i].filter(u=>allUma[i+1].includes(u));
+      if(common.length)chains.push({rA:avail[i],rB:avail[i+1],common});
+    }
+    const countMap={};
+    avail.forEach((r,i)=>allUma[i].forEach(u=>{countMap[u]=(countMap[u]||0)+1;}));
+    const recurring=Object.entries(countMap).filter(([,c])=>c>=2).map(([u,c])=>({uma:Number(u),count:c}));
+    const kuraChains=[];
+    for(let i=0;i<avail.length-1;i++){
+      if(allKura[i][0]===allKura[i+1][0]&&allKura[i][1]===allKura[i+1][1])
+        kuraChains.push({rA:avail[i],rB:avail[i+1],kura:allKura[i]});
+    }
+    const fGrp={A:[1,4,7],B:[2,5,8],C:[3,6]};
+    const frameSeq=avail.map((r,i)=>{
+      const k=allKura[i];
+      const g=Object.entries(fGrp).find(([,v])=>k.some(x=>v.includes(x)));
+      return{r,kura:k,grp:g?g[0]:'?'};
+    });
+    const backSeq=frameSeq.filter(x=>x.r>=7);
+    let consecGrp='';
+    if(backSeq.length>=2){
+      const last=backSeq[backSeq.length-1].grp;
+      const run=backSeq.filter(x=>x.grp===last).length;
+      if(run>=2)consecGrp=`後半で枠${last}組が${run}回連続`;
+    }
+    return{name:names[gi],avail,allUma,allKura,chains,recurring,kuraChains,frameSeq,consecGrp};
+  });
+}
+
+function analyzeChain(day,maxR){
+  const app={};
+  for(let r=1;r<=maxR;r++){const d=getRace(day,r);if(!d)continue;d.uma.forEach(u=>{if(!app[u])app[u]=[];app[u].push(r);});}
+  const signals=[],warn=[];
+  Object.entries(app).forEach(([uma,rs])=>{
+    if(rs.length<2)return;
+    const s=rs.sort((a,b)=>a-b);
+    let mx=1,tmp=1;
+    for(let i=1;i<s.length;i++){s[i]-s[i-1]===1?tmp++:tmp=1;mx=Math.max(mx,tmp);}
+    const last=s[s.length-1];
+    if(mx>=3)warn.push({uma:Number(uma),rs,type:'飽和'});
+    else if(rs.length>=4&&mx<3)signals.push({uma:Number(uma),rs,type:'復活'});
+    else if(mx===2&&last>=maxR-2)signals.push({uma:Number(uma),rs,type:'3回目狙い'});
+  });
+  return{signals,warn};
+}
+
+function analyzeMirror(day){
+  const r2=getRace(day,2),r3=getRace(day,3),r9=getRace(day,9),r10=getRace(day,10),r4=getRace(day,4);
+  if(!r3||!r9||!r10)return{active:false};
+  const chain9=r4?r4.uma.filter(u=>r9.uma.includes(u)):[];
+  const mirror3in10=r3.uma.filter(u=>r10.uma.includes(u));
+  // ★前提条件：6R↔7R（核）と5R↔8Rが成立していること
+  const r6=getRace(day,6),r7=getRace(day,7),r5=getRace(day,5),r8=getRace(day,8);
+  const core67=r6&&r7?r6.uma.filter(u=>r7.uma.includes(u)).length>0:false;
+  const fold58=r5&&r8?r5.uma.filter(u=>r8.uma.includes(u)).length>0:false;
+  const prereqOk=core67&&fold58;
+  return{
+    active:prereqOk&&chain9.length===0&&mirror3in10.length>0,
+    prereqOk,core67,fold58,
+    chain9broken:chain9.length===0,
+    mirror3in10,
+    mirror2pred:r2?r2.uma:[]
+  };
+}
+
+function analyzeFold(day,targetR){
+  const pairs=[[6,7],[5,8],[4,9],[3,10],[2,11],[1,12]];
+  const labels=['核:6R↔7R','5R↔8R','4R↔9R','3R↔10R','2R↔11R','1R↔12R'];
+  return pairs.map(([a,b],i)=>{
+    const dA=getRace(day,a),dB=getRace(day,b);
+    const uA=dA?dA.uma:[],uB=dB?dB.uma:[];
+    const common=uA.filter(u=>uB.includes(u));
+    const isPred=b===targetR;
+    // 11R予測：isRefなし（元のv23動作を維持）
+    // 12R予測：2R↔11Rのみ参照
+    const isRef = isPred ? false : (
+      targetR===12 && b===11 ? true : false
+    );
+    return{label:labels[i],a,b,uA,uB,common,isPred,isRef};
+  });
+}
+
+function analyzeUmaKuraChain(day,maxR){
+  const umaSeq={},kuraSeq={};
+  for(let r=1;r<=maxR;r++){
+    const d=getRace(day,r);if(!d)continue;
+    // ★1・2着のみカウント（馬連視点）
+    [d.uma[0],d.uma[1]].filter(Boolean).forEach(u=>{if(!umaSeq[u])umaSeq[u]=[];umaSeq[u].push(r);});
+    d.kura.forEach(k=>{if(!kuraSeq[k])kuraSeq[k]=[];kuraSeq[k].push(r);});
+  }
+  const umaAlerts=[],kuraAlerts=[];
+  Object.entries(umaSeq).forEach(([uma,rs])=>{
+    const s=[...new Set(rs)].sort((a,b)=>a-b);
+    let has3consecutive=false;
+    for(let i=0;i<=s.length-3;i++){
+      if(s[i+1]-s[i]===1&&s[i+2]-s[i+1]===1){
+        umaAlerts.push({uma:Number(uma),rs:s,type:'3連続'});
+        has3consecutive=true;
+      }
+    }
+    // ★3連続が既にある場合は2連続→次注目を出さない
+    if(!has3consecutive&&s.length>=2){
+      const last=s[s.length-1];
+      if(last>=7&&s[s.length-2]===last-1)
+        umaAlerts.push({uma:Number(uma),rs:s,type:'2連続→次注目'});
+    }
+  });
+  Object.entries(kuraSeq).forEach(([kura,rs])=>{
+    const s=[...new Set(rs)].sort((a,b)=>a-b);
+    let has3consecutive=false;
+    for(let i=0;i<=s.length-3;i++){
+      if(s[i+1]-s[i]===1&&s[i+2]-s[i+1]===1){
+        kuraAlerts.push({kura:Number(kura),rs:s,type:'3連続'});
+        has3consecutive=true;
+      }
+    }
+    // ★3連続が既にある場合は2連続→次注目を出さない
+    if(!has3consecutive&&s.length>=2){
+      const last=s[s.length-1];
+      if(last>=7&&s[s.length-2]===last-1)
+        kuraAlerts.push({kura:Number(kura),rs:s,type:'2連続→次注目'});
+    }
+  });
+  return{umaAlerts,kuraAlerts};
+}
+
+function analyzeFrame(day,maxR){
+  const cnt={1:0,2:0,3:0,4:0,5:0,6:0,7:0,8:0};
+  const alerts=[];
+  // 直前レース（maxR）で出た枠を記録
+  const lastRaceKura=getRace(day,maxR)?getRace(day,maxR).kura:[];
+  for(let r=1;r<=maxR;r++){const d=getRace(day,r);if(!d)continue;d.kura.forEach(k=>{if(cnt[k]!==undefined)cnt[k]++;});}
+  Object.entries(cnt).forEach(([f,c])=>{
+    const fNum=Number(f);
+    const isOuter=fNum>=7; // 外枠（7・8枠）
+    const justHit6=c>=6&&lastRaceKura.includes(fNum); // 直前レースで6回目が出た
+    if(justHit6){
+      // 6回目が直前レースで出た→次は除外に近いレベル
+      alerts.push(`${f}枠が${c}回→収束済み！次レースは狙わない`);
+    } else if(c>=6){
+      if(isOuter)alerts.push(`${f}枠が${c}回→外枠のみ7回目あり得る`);
+      else alerts.push(`${f}枠が${c}回→収束済み・内枠は次レース狙わない`);
+    } else if(c>=5){
+      alerts.push(`${f}枠が${c}回→6回目を狙う（強アラート）`);
+    }
+  });
+  let p7=false,p5=false;
+  for(let r=1;r<=maxR;r++){
+    const d=getRace(day,r);if(!d)continue;
+    if(d.kura.includes(7)&&p7)alerts.push(`7枠が${r-1}R→${r}R連続→3回目の可能性`);
+    if(d.kura.includes(5)&&p5)alerts.push(`5枠が${r-1}R→${r}R連続→3回目の可能性`);
+    p7=d.kura.includes(7);p5=d.kura.includes(5);
+  }
+  const grp={A:0,B:0,C:0};
+  for(let r=1;r<=maxR;r++){const d=getRace(day,r);if(!d)continue;d.kura.forEach(k=>{if([1,4,7].includes(k))grp.A++;else if([2,5,8].includes(k))grp.B++;else if([3,6].includes(k))grp.C++;});}
+  return{cnt,alerts,grp,lastRaceKura};
+}
+
+function analyzeFrameChain(day,maxR){
+  const cumCount={1:0,2:0,3:0,4:0,5:0,6:0,7:0,8:0};
+  const history=[];
+  for(let r=1;r<=maxR;r++){
+    const d=getRace(day,r);
+    if(!d){history.push({r,cnt:{...cumCount}});continue;}
+    d.kura.forEach(k=>{if(cumCount[k]!==undefined)cumCount[k]++;});
+    history.push({r,cnt:{...cumCount},kura:d.kura});
+  }
+  const current=history[history.length-1]?.cnt||cumCount;
+  const targets=[];
+  Object.entries(current).forEach(([f,cnt])=>{
+    if(cnt===0)return;
+    const lastR=history[history.length-1];
+    const inLast=lastR&&lastR.kura&&lastR.kura.includes(Number(f));
+    let type='';
+    if(cnt===1&&inLast)type=`${f}枠が${maxR}Rで初出現→2回目狙い`;
+    else if(cnt===2)type=`${f}枠が${cnt}回→3回目狙い`;
+    else if(cnt===3)type=`${f}枠が${cnt}回→4回目狙い★`;  // 奇数→偶数
+    else if(cnt===4)type=`${f}枠が${cnt}回→5回目狙い`;
+    else if(cnt>=5)type=`${f}枠が${cnt}回→6回目収束★`;   // 奇数→偶数
+    if(type){
+      // 奇数回→偶数回（3→4、5→6）を最優先
+      const priority=cnt===5?6:cnt===3?5:cnt===2?3:cnt===1?1:cnt===4?2:1;
+      targets.push({frame:Number(f),cnt,type,priority});
+    }
+  });
+  targets.sort((a,b)=>b.priority-a.priority||b.cnt-a.cnt);
+  const fGrp={A:[1,4,7],B:[2,5,8],C:[3,6]};
+  const grpCnt={A:0,B:0,C:0};
+  Object.entries(current).forEach(([f,cnt])=>{
+    Object.entries(fGrp).forEach(([g,v])=>{if(v.includes(Number(f)))grpCnt[g]+=cnt;});
+  });
+  const domGrp=Object.entries(grpCnt).sort((a,b)=>b[1]-a[1])[0];
+
+  // ★エネルギー転移：飽和枠(6回以上)→同グループ他枠が代行
+  const fGrpMap={1:'A',4:'A',7:'A',2:'B',5:'B',8:'B',3:'C',6:'C'};
+  const fGrpMembers={A:[1,4,7],B:[2,5,8],C:[3,6]};
+  const energyTransfer=[];
+  Object.entries(current).forEach(([f,cnt])=>{
+    if(cnt>=6){
+      const grp=fGrpMap[Number(f)];
+      if(grp){
+        const others=fGrpMembers[grp].filter(x=>x!==Number(f));
+        others.forEach(to=>{
+          if(current[to]<cnt){
+            energyTransfer.push({from:Number(f),to,cnt,grp});
+          }
+        });
+      }
+    }
+  });
+
+  return{targets,current,history,domGrp,grpCnt,energyTransfer};
+}
+
+function predictTargetFrame(day,targetR){
+  const maxR=targetR-1;
+  const frame=analyzeFrame(day,maxR);
+  const brother=analyzeBrother(day,maxR);
+  const fold=analyzeFold(day,targetR);
+  const frameScore={1:0,2:0,3:0,4:0,5:0,6:0,7:0,8:0};
+  const frameReasons={1:[],2:[],3:[],4:[],5:[],6:[],7:[],8:[]};
+  Object.entries(frame.cnt).forEach(([f,c])=>{
+    const fNum=Number(f);
+    const isOuter=fNum>=7;
+    const justHit6=c>=6&&frame.lastRaceKura&&frame.lastRaceKura.includes(fNum);
+    const inLast=frame.lastRaceKura&&frame.lastRaceKura.includes(fNum);
+    if(justHit6){
+      frameScore[fNum]-=5;
+      frameReasons[fNum].push(`${f}枠収束済み→次レース除外`);
+    } else if(c>=6&&!isOuter){
+      frameScore[fNum]-=3;
+      frameReasons[fNum].push(`${f}枠収束済み（内枠）→狙わない`);
+    } else if(c>=6&&isOuter){
+      frameScore[fNum]+=1;
+      frameReasons[fNum].push(`${f}枠が${c}回→外枠7回目あり得る`);
+    } else if(c===5){
+      // 奇数5回→偶数6回目が最優先
+      frameScore[fNum]+=5;
+      frameReasons[fNum].push(`${f}枠が${c}回→6回目収束★最優先`);
+    } else if(c===3){
+      // 奇数3回→偶数4回目も強く狙う
+      frameScore[fNum]+=3.5;
+      frameReasons[fNum].push(`${f}枠が${c}回→4回目狙い★`);
+    } else if(c===4){
+      frameScore[fNum]+=1.5;
+      frameReasons[fNum].push(`${f}枠が${c}回出現`);
+    } else if(c===1&&inLast){
+      frameScore[fNum]+=1;
+      frameReasons[fNum].push(`${f}枠が初出現→2回目狙い`);
+    }
+  });
+  let p7=false,p5=false,prev7R=0,prev5R=0;
+  for(let r=1;r<=maxR;r++){
+    const d=getRace(day,r);if(!d)continue;
+    if(d.kura.includes(7)){if(p7){frameScore[7]+=2;frameReasons[7].push(`7枠が${prev7R}R→${r}R連続`);}p7=true;prev7R=r;}else p7=false;
+    if(d.kura.includes(5)){if(p5){frameScore[5]+=2;frameReasons[5].push(`5枠が${prev5R}R→${r}R連続`);}p5=true;prev5R=r;}else p5=false;
+  }
+  const fGrp={A:[1,4,7],B:[2,5,8],C:[3,6]};
+  brother.forEach(b=>{
+    if(b.consecGrp){
+      const grpName=b.consecGrp.match(/枠([ABC])組/);
+      if(grpName){const grp=grpName[1];fGrp[grp].forEach(f=>{frameScore[f]+=2;frameReasons[f].push(b.consecGrp+`(${b.name})`);});}
+    }
+  });
+  fold.filter(f=>f.isPred&&f.common.length).forEach(f=>{
+    f.common.forEach(uma=>{
+      for(let r=1;r<=maxR;r++){
+        const d=getRace(day,r);if(!d)continue;
+        const idx=d.uma.indexOf(uma);
+        if(idx>=0&&d.frames[idx]){frameScore[d.frames[idx]]+=1.5;frameReasons[d.frames[idx]].push(`折り畳み連鎖馬番${uma}が${d.frames[idx]}枠`);break;}
+      }
+    });
+  });
+  const sorted=Object.entries(frameScore).filter(([,s])=>s>0).sort((a,b)=>b[1]-a[1]).slice(0,2);
+  return sorted.map(([f,s])=>({frame:Number(f),score:Math.round(s*10)/10,reasons:[...new Set(frameReasons[f])]}));
+}
+
+function analyzePop(day,maxR){
+  const pops=[];
+  for(let r=1;r<=maxR;r++){const d=getRace(day,r);if(!d||!d.pop1)continue;pops.push({r,pop:d.pop1,group:popGroup(d.pop1)});}
+  const back=pops.filter(p=>p.r>=7);
+  let consecutive='';
+  if(back.length>=2){const gl=back.map(p=>p.group);const last=gl[gl.length-1];const cnt=gl.filter(g=>g===last).length;if(cnt>=2)consecutive=`後半${last}群が${cnt}回連続→${last}群優位`;}
+  return{pops,consecutive};
+}
+
+function getAxisCandidates(day,targetR,popMap={}){
+  const maxR=targetR-1;
+  const fold=analyzeFold(day,targetR);
+  const brother=analyzeBrother(day,maxR);
+  // ★12R予測時：馬番連鎖・馬連連続は10Rまで（11Rの影響除外）
+  const chainMaxR=targetR===12?10:maxR;
+  const chain=analyzeChain(day,chainMaxR);
+  const mirror=analyzeMirror(day);
+  const ukcMaxR=targetR===12?10:maxR;
+  const ukc=analyzeUmaKuraChain(day,ukcMaxR);
+  const cands={};
+  const add=(uma,reason,score)=>{
+    if(!uma||uma<=0)return;
+    if(!cands[uma])cands[uma]={reasons:[],score:0};
+    if(!cands[uma].reasons.includes(reason)){cands[uma].reasons.push(reason);cands[uma].score+=score;}
+  };
+  fold.filter(f=>(f.isPred||f.isRef)&&f.common.length).forEach(f=>{
+    // isPred（直接折り畳み）：11R=4点、12R=6点（最優先）
+    // isRef（参照折り畳み）：2点（補助）
+    const baseScore = f.isPred ? (targetR===12?6:4) : 2;
+    f.common.forEach(n=>add(n,f.label,baseScore));
+  });
+  // 1R単独参照：12R予測時に1Rの馬番を最優先で反映（折り畳み候補）
+  if(targetR===12){
+    const r1=getRace(day,1);
+    if(r1){
+      r1.uma.forEach(u=>add(u,'1R折り畳み候補→12R',6));
+    }
+    // 2R↔11R連鎖馬番も12Rに反映
+    const r2=getRace(day,2);
+    const r11=getRace(day,11);
+    if(r2&&r11){
+      const common2_11=r2.uma.filter(u=>r11.uma.includes(u));
+      common2_11.forEach(u=>add(u,'2R↔11R折り畳み→12R',5));
+    }
+  }
+  brother.forEach(b=>{
+    b.chains.forEach(c=>{
+      // ★12R予測時：兄弟連鎖スコアを抑える（1R折り畳みを優先）
+      const has11R=(c.rA===11||c.rB===11)&&targetR===12;
+      const baseScore=c.rB>=7?2.5:1.5;
+      const score=has11R?baseScore*0.3:baseScore;
+      c.common.forEach(u=>add(u,`兄弟連鎖(${b.name} ${c.rA}R↔${c.rB}R)`,score));
+    });
+    // ★12R予測時：11Rを除いた兄弟レースのみでrecurringを計算
+    const recurringRaces=targetR===12?b.avail.filter(r=>r!==11):b.avail;
+    const countMap12={};
+    recurringRaces.forEach(r=>{
+      const d=getRace(day,r);if(!d)return;
+      d.uma.forEach(u=>{countMap12[u]=(countMap12[u]||0)+1;});
+    });
+    Object.entries(countMap12).filter(([,c])=>c>=2).forEach(([u,c])=>add(Number(u),`兄弟${c}回出現(${b.name})`,1));
+  });
+  chain.signals.forEach(s=>add(s.uma,`馬番連鎖(${s.type})`,1.5));
+  if(mirror.active&&targetR===11)mirror.mirror2pred.forEach(u=>add(u,'鏡面復活(2R→11R)',2));
+  ukc.umaAlerts.forEach(a=>{
+    if(a.type==='3連続')add(a.uma,`馬連馬番${a.uma}:3連続`,2);
+    else add(a.uma,`馬連馬番${a.uma}:2連続→次注目`,1);
+  });
+  let sorted=Object.entries(cands).sort((a,b)=>b[1].score-a[1].score);
+  if(Object.keys(popMap).length>0){
+  // B群フィルター削除：ロジックスコア上位2頭をそのまま返す（買い判断は人間が行う）
+  }
+  return sorted.slice(0,2);
+}
+
+
 var simpleDay = null;
 var manualR = 10;
 
@@ -635,11 +1108,22 @@ function runPredict(){
     });
     fChain.energyTransfer.forEach(function(et){
       var e=targetFrames.find(function(f){ return f.frame===et.to; });
-      if(e){ e.score+=1.5; e.reasons.unshift(et.from+'枠→'+et.to+'枠'); }
-      else targetFrames.push({frame:et.to,score:1.5,reasons:[et.from+'枠→'+et.to+'枠']});
+      if(e){ e.score+=2; e.reasons.unshift(et.from+'枠飽和→'+et.to+'枠エネルギー代行'); }
+      else targetFrames.push({frame:et.to,score:2,reasons:[et.from+'枠飽和→'+et.to+'枠エネルギー代行']});
     });
     targetFrames.sort(function(a,b){ return b.score-a.score; });
     topFrames = targetFrames.slice(0,3);
+
+    // 始点回帰：1Rの馬番を12R予測に反映
+    if(targetR===12){
+      var r1=getRace(simpleDay,1);
+      var fold12=analyzeFold(simpleDay,12);
+      var fold1r12=fold12.find(function(f){ return f.a===1&&f.b===12; });
+      if(r1&&fold1r12&&fold1r12.common.length>0){
+        document.getElementById('popmsg').textContent='★始点回帰★ 1Rの馬番'+fold1r12.common.join('・')+'が12Rで復活候補！';
+        document.getElementById('popmsg').style.display='block';
+      }
+    }
   }catch(e){
     showSt('st','予測エラー: '+e.message,'warn');
     return;
