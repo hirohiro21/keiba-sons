@@ -64,8 +64,8 @@ input[type=number]{background:var(--bg3);border:1px solid var(--bd2);border-radi
   <textarea id="ta" placeholder="れじまぐからコピーしたテキストをここに貼り付けてください"></textarea>
   <div style="display:flex;gap:8px;margin-top:8px;">
     <select id="targetR" style="background:var(--bg3);border:1px solid var(--bd2);border-radius:6px;color:var(--tx);padding:8px 10px;font-size:13px;">
-      <option value="11">11R予測</option>
-      <option value="12">12R予測</option>
+      <option value="12">11R予測（1R〜10Rを貼り付け）</option>
+      <option value="11">12R予測（1R〜11Rを貼り付け）</option>
     </select>
     <button class="btn btn-gold" style="margin:0;flex:1;" onclick="runPredict()">▶ 予想する</button>
   </div>
@@ -75,10 +75,9 @@ input[type=number]{background:var(--bg3);border:1px solid var(--bd2);border-radi
 
 <div class="card">
   <div class="ctitle">STEP 1.5 : 10R・11Rを手入力（未掲載の場合）</div>
-  <p style="font-size:11px;color:var(--tx2);margin-bottom:10px;">貼り付けデータに含まれていればスキップ</p>
+  <p style="font-size:11px;color:var(--tx2);margin-bottom:10px;">10Rがれじまぐ未掲載の場合のみ入力（11R予測用）</p>
   <div style="margin-bottom:10px;">
-    <button class="tab-btn active" id="tb10" onclick="setTab(10)">10R</button>
-    <button class="tab-btn" id="tb11" onclick="setTab(11)">11R</button>
+    <button class="tab-btn active" id="tb10" onclick="setTab(10)">10R手入力</button>
   </div>
   <div class="grid2">
     <div><div class="lbl">1着 枠-馬番</div><div class="input2"><input type="number" id="f1" placeholder="枠"><input type="number" id="u1" placeholder="馬番"></div></div>
@@ -1063,10 +1062,12 @@ function regManual(){
   if(!f1||!u1||!f2||!u2||!f3||!u3){ showSt('mst','1〜3着の枠と馬番を入力してください','warn'); return; }
   simpleDay.races[manualR]={
     n:manualR,
-    rows:[{ord:1,frame:f1,num:u1},{ord:2,frame:f2,num:u2},{ord:3,frame:0,num:u3}],
+    rows:[{ord:1,frame:f1,num:u1},{ord:2,frame:f2,num:u2},{ord:3,frame:f2,num:u3}],
     kura:[Math.min(f1,f2),Math.max(f1,f2)],
     pop1:p1,pop2:0,pop3:0
   };
+  // データを確実に反映するためsimpleDayを更新
+  simpleDay = JSON.parse(JSON.stringify(simpleDay));
   showSt('mst', manualR+'Rを登録しました','ok');
 }
 
@@ -1090,9 +1091,17 @@ function runPredict(){
   try{ parsed = parseText(txt); }catch(e){ showSt('st','解析エラー: '+e.message,'warn'); return; }
   if(!parsed||!parsed.length){ showSt('st','解析できませんでした','warn'); return; }
   simpleDay = parsed[parsed.length-1];
-  var targetR = parseInt(document.getElementById('targetR').value);
+  var targetR = parseInt(document.getElementById('targetR').value) || 11;
   var raceCnt = Object.keys(simpleDay.races||{}).filter(function(r){ return getRace(simpleDay,parseInt(r)); }).length;
   if(raceCnt < 2){ showSt('st','データが少なすぎます','warn'); return; }
+  console.log("targetR value:", document.getElementById('targetR').value, "parsed:", targetR);
+  // デバッグ：11R・12Rデータ確認
+  var r11check = getRace(simpleDay, 11);
+  var r1check = getRace(simpleDay, 1);
+  console.log('11Rデータ:', r11check ? JSON.stringify(r11check) : 'なし');
+  console.log('1Rデータ:', r1check ? JSON.stringify(r1check) : 'なし');
+  console.log('全レース数:', raceCnt);
+  console.log('targetR:', targetR);
 
   var final, pop, fChain, targetFrames, topFrames;
   try{
