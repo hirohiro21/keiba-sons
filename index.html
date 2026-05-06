@@ -122,6 +122,17 @@ function parseText(txt){
   const days=[];
   let curDay=null, curRace=null, inResultTable=false;
 
+  // JRA新形式対応：「枠5黄」→「5」に変換
+  txt = txt.replace(/枠(\d)[白黒赤青黄緑橙桃]/g, '$1');
+  // 「（着差）」を除去
+  txt = txt.replace(/（着差）/g, '').replace(/\(着差\)/g, '');
+  // 「レース結果\nレース結果」重複を除去
+  txt = txt.replace(/レース結果\nレース結果/g, 'レース結果');
+  // 「ページトップへ戻る」を除去
+  txt = txt.replace(/ページトップへ戻る/g, '');
+  // 「3回京都4日」などの開催情報を除去
+  txt = txt.replace(/\d+回[^\n]{1,20}日[^\n]*/g, '');
+
   // JRA直接コピペ対応：「1\t」「6」「11\tバケラッタ」の3行を1行に結合
   const rawLines = txt.split('\n');
   const mergedLines = [];
@@ -157,11 +168,18 @@ function parseText(txt){
     // ===== 日付検出（ノイズより先に処理）=====
     const dm=l.match(/(\d{4}年\d+月\d+日)/);
     if(dm){
+      const newDate=dm[1];
+      // 同じ日付なら既存のcurDayを継続（JRA形式は各レースに日付が入る）
+      if(curDay&&curDay.date===newDate){
+        curRace=null;inResultTable=false;continue;
+      }
       if(curDay)days.push(curDay);
-      curDay={date:dm[1],races:{}};
+      curDay={date:newDate,races:{}};
       curRace=null;inResultTable=false;continue;
     }
 
+    // 「日」単独行をスキップ
+    if(l==='日')continue;
     // ===== ノイズスキップ（日付検出の後）=====
     if(l.match(/^\[中央競馬.*\]\(http/))continue;
     if(l.match(/^> \d{4}年/))continue;
@@ -176,8 +194,10 @@ function parseText(txt){
     // ===== ★レース番号検出（最強化）=====
     // 対応: "11R", "11R WIN5", "11RWIN5", "11R\t霜月S", 等
     const rm=l.match(/^(\d{1,2})R/);
-    if(rm){
-      const rn=parseInt(rm[1]);
+    // 「1レース」形式（JRA新形式）も対応
+    const rmJP=l.match(/^(\d{1,2})レース$/);
+    if(rm||rmJP){
+      const rn=parseInt((rm||rmJP)[1]);
       if(rn>=1&&rn<=12){
         if(!curDay)curDay={date:'当日',races:{}};
         curRace={n:rn,rows:[],kura:[],pop1:0,pop2:0,pop3:0};
@@ -190,8 +210,19 @@ function parseText(txt){
     if(!curRace)continue;
 
     // ===== テーブル制御 =====
-    if(l==='レース結果'){inResultTable=true;continue;}
+    if(l==='レース結果'||l==='結果'){inResultTable=true;continue;}
     if(l==='払戻金'||l==='結果払戻'||l.startsWith('結果払戻')||l==='¥ 払戻金'){inResultTable=false;continue;}
+    // 単勝処理：れじまぐ形式「単勝	9	350円	2番人気」とJRA形式「単勝」単独を両対応
+    if(l==='単勝'||l.startsWith('単勝\t')){
+      inResultTable=false;
+      if(curRace){
+        // れじまぐ形式：単勝行に人気が含まれる
+        const tmInline=l.match(/単勝[\t\s]+\d+[\t\s]+[\d,]+円[\t\s]+(\d+)番人気/);
+        if(tmInline){curRace.pop1=parseInt(tmInline[1]);}
+        else{curRace._inTansho=true;} // JRA形式
+      }
+      continue;
+    }
     if(l.includes('着順')&&l.includes('枠')&&l.includes('馬番'))continue;
 
     // ===== 結果テーブル =====
@@ -208,13 +239,16 @@ function parseText(txt){
       continue;
     }
 
-    // ===== JRA形式：結果行（着順	枠	馬番	馬名	タイム）=====
-    if(!inResultTable&&curRace){
+    // ===== JRA形式：結果行（着順	枠	馬番	馬名	タイム）inResultTable時のみ =====
+    if(curRace&&inResultTable){
       const t=l.split('\t');
       if(t.length>=4){
         const ord=parseInt(t[0]),frame=parseInt(t[1]),num=parseInt(t[2]);
+        // 馬名が4番目にあることを確認（数字でないこと）
+        const hasName = t[3] && isNaN(parseInt(t[3].trim()));
         if(!isNaN(ord)&&!isNaN(frame)&&!isNaN(num)&&
            ord>=1&&ord<=3&&frame>=1&&frame<=8&&num>=1&&num<=18&&
+           hasName&&
            curRace.rows.length<3&&!curRace.rows.find(r=>r.ord===ord)){
           curRace.rows.push({ord,frame,num});
           continue;
@@ -239,23 +273,25 @@ function parseText(txt){
         if(a>=1&&a<=8&&b>=1&&b<=8)curRace.kura=[Math.min(a,b),Math.max(a,b)];
         continue;
       }
-      // JRA形式単勝：「11	670円	3番人気」
+      // JRA形式 払戻：「馬番	金額	人気」形式
       const tmJRA=l.match(/^(\d+)[\t\s]+[\d,]+円[\t\s]+(\d+)番人気$/);
-      if(tmJRA){
+      if(tmJRA&&curRace){
         const p=parseInt(tmJRA[2]);
-        if(curRace._inTansho&&!curRace.pop1){
-          curRace.pop1=p;
-          curRace._inTansho=false;
+        if(curRace._inTansho){
+          if(!curRace.pop1){curRace.pop1=p;curRace._inTansho=false;}
           continue;
         }
-        // JRA複勝：2着・3着人気
         if(curRace._inFukusho){
-          if(!curRace.pop2){curRace.pop2=p;continue;}
-          else if(!curRace.pop3){curRace.pop3=p;curRace._inFukusho=false;continue;}
+          // 複勝：1行目=1着馬の複勝（スキップ）、2行目=2着人気、3行目=3着人気
+          curRace._fukushoCnt=(curRace._fukushoCnt||0)+1;
+          if(curRace._fukushoCnt===1){/* 1着馬の複勝はスキップ */}
+          else if(curRace._fukushoCnt===2){curRace.pop2=p;}
+          else if(curRace._fukushoCnt===3){curRace.pop3=p;curRace._inFukusho=false;}
+          continue;
         }
       }
-      if(l==='単勝'||l.startsWith('単勝\t')){curRace._inTansho=true;curRace._inFukusho=false;}
-      if(l==='複勝'||l.startsWith('複勝\t')){curRace._inFukusho=true;curRace._inTansho=false;}
+      if((l==='単勝'||l.startsWith('単勝\t'))&&curRace){curRace._inTansho=true;curRace._inFukusho=false;curRace._fukushoCnt=0;}
+      if((l==='複勝'||l.startsWith('複勝\t'))&&curRace){curRace._inFukusho=true;curRace._inTansho=false;curRace._fukushoCnt=0;}
       const tm=l.match(/^単勝[\t\s]+\d+[\t\s]+[\d,]+円[\t\s]+(\d+)番人気/);
       if(tm&&!curRace.pop1){curRace.pop1=parseInt(tm[1]);continue;}
       // 複勝から2着・3着人気を抽出（「X番人気」単独行）
@@ -662,6 +698,17 @@ function parseText(txt){
   const days=[];
   let curDay=null, curRace=null, inResultTable=false;
 
+  // JRA新形式対応：「枠5黄」→「5」に変換
+  txt = txt.replace(/枠(\d)[白黒赤青黄緑橙桃]/g, '$1');
+  // 「（着差）」を除去
+  txt = txt.replace(/（着差）/g, '').replace(/\(着差\)/g, '');
+  // 「レース結果\nレース結果」重複を除去
+  txt = txt.replace(/レース結果\nレース結果/g, 'レース結果');
+  // 「ページトップへ戻る」を除去
+  txt = txt.replace(/ページトップへ戻る/g, '');
+  // 「3回京都4日」などの開催情報を除去
+  txt = txt.replace(/\d+回[^\n]{1,20}日[^\n]*/g, '');
+
   // JRA直接コピペ対応：「1\t」「6」「11\tバケラッタ」の3行を1行に結合
   const rawLines = txt.split('\n');
   const mergedLines = [];
@@ -697,11 +744,18 @@ function parseText(txt){
     // ===== 日付検出（ノイズより先に処理）=====
     const dm=l.match(/(\d{4}年\d+月\d+日)/);
     if(dm){
+      const newDate=dm[1];
+      // 同じ日付なら既存のcurDayを継続（JRA形式は各レースに日付が入る）
+      if(curDay&&curDay.date===newDate){
+        curRace=null;inResultTable=false;continue;
+      }
       if(curDay)days.push(curDay);
-      curDay={date:dm[1],races:{}};
+      curDay={date:newDate,races:{}};
       curRace=null;inResultTable=false;continue;
     }
 
+    // 「日」単独行をスキップ
+    if(l==='日')continue;
     // ===== ノイズスキップ（日付検出の後）=====
     if(l.match(/^\[中央競馬.*\]\(http/))continue;
     if(l.match(/^> \d{4}年/))continue;
@@ -716,8 +770,10 @@ function parseText(txt){
     // ===== ★レース番号検出（最強化）=====
     // 対応: "11R", "11R WIN5", "11RWIN5", "11R\t霜月S", 等
     const rm=l.match(/^(\d{1,2})R/);
-    if(rm){
-      const rn=parseInt(rm[1]);
+    // 「1レース」形式（JRA新形式）も対応
+    const rmJP=l.match(/^(\d{1,2})レース$/);
+    if(rm||rmJP){
+      const rn=parseInt((rm||rmJP)[1]);
       if(rn>=1&&rn<=12){
         if(!curDay)curDay={date:'当日',races:{}};
         curRace={n:rn,rows:[],kura:[],pop1:0,pop2:0,pop3:0};
@@ -730,8 +786,19 @@ function parseText(txt){
     if(!curRace)continue;
 
     // ===== テーブル制御 =====
-    if(l==='レース結果'){inResultTable=true;continue;}
+    if(l==='レース結果'||l==='結果'){inResultTable=true;continue;}
     if(l==='払戻金'||l==='結果払戻'||l.startsWith('結果払戻')||l==='¥ 払戻金'){inResultTable=false;continue;}
+    // 単勝処理：れじまぐ形式「単勝	9	350円	2番人気」とJRA形式「単勝」単独を両対応
+    if(l==='単勝'||l.startsWith('単勝\t')){
+      inResultTable=false;
+      if(curRace){
+        // れじまぐ形式：単勝行に人気が含まれる
+        const tmInline=l.match(/単勝[\t\s]+\d+[\t\s]+[\d,]+円[\t\s]+(\d+)番人気/);
+        if(tmInline){curRace.pop1=parseInt(tmInline[1]);}
+        else{curRace._inTansho=true;} // JRA形式
+      }
+      continue;
+    }
     if(l.includes('着順')&&l.includes('枠')&&l.includes('馬番'))continue;
 
     // ===== 結果テーブル =====
@@ -748,13 +815,16 @@ function parseText(txt){
       continue;
     }
 
-    // ===== JRA形式：結果行（着順	枠	馬番	馬名	タイム）=====
-    if(!inResultTable&&curRace){
+    // ===== JRA形式：結果行（着順	枠	馬番	馬名	タイム）inResultTable時のみ =====
+    if(curRace&&inResultTable){
       const t=l.split('\t');
       if(t.length>=4){
         const ord=parseInt(t[0]),frame=parseInt(t[1]),num=parseInt(t[2]);
+        // 馬名が4番目にあることを確認（数字でないこと）
+        const hasName = t[3] && isNaN(parseInt(t[3].trim()));
         if(!isNaN(ord)&&!isNaN(frame)&&!isNaN(num)&&
            ord>=1&&ord<=3&&frame>=1&&frame<=8&&num>=1&&num<=18&&
+           hasName&&
            curRace.rows.length<3&&!curRace.rows.find(r=>r.ord===ord)){
           curRace.rows.push({ord,frame,num});
           continue;
@@ -779,23 +849,25 @@ function parseText(txt){
         if(a>=1&&a<=8&&b>=1&&b<=8)curRace.kura=[Math.min(a,b),Math.max(a,b)];
         continue;
       }
-      // JRA形式単勝：「11	670円	3番人気」
+      // JRA形式 払戻：「馬番	金額	人気」形式
       const tmJRA=l.match(/^(\d+)[\t\s]+[\d,]+円[\t\s]+(\d+)番人気$/);
-      if(tmJRA){
+      if(tmJRA&&curRace){
         const p=parseInt(tmJRA[2]);
-        if(curRace._inTansho&&!curRace.pop1){
-          curRace.pop1=p;
-          curRace._inTansho=false;
+        if(curRace._inTansho){
+          if(!curRace.pop1){curRace.pop1=p;curRace._inTansho=false;}
           continue;
         }
-        // JRA複勝：2着・3着人気
         if(curRace._inFukusho){
-          if(!curRace.pop2){curRace.pop2=p;continue;}
-          else if(!curRace.pop3){curRace.pop3=p;curRace._inFukusho=false;continue;}
+          // 複勝：1行目=1着馬の複勝（スキップ）、2行目=2着人気、3行目=3着人気
+          curRace._fukushoCnt=(curRace._fukushoCnt||0)+1;
+          if(curRace._fukushoCnt===1){/* 1着馬の複勝はスキップ */}
+          else if(curRace._fukushoCnt===2){curRace.pop2=p;}
+          else if(curRace._fukushoCnt===3){curRace.pop3=p;curRace._inFukusho=false;}
+          continue;
         }
       }
-      if(l==='単勝'||l.startsWith('単勝\t')){curRace._inTansho=true;curRace._inFukusho=false;}
-      if(l==='複勝'||l.startsWith('複勝\t')){curRace._inFukusho=true;curRace._inTansho=false;}
+      if((l==='単勝'||l.startsWith('単勝\t'))&&curRace){curRace._inTansho=true;curRace._inFukusho=false;curRace._fukushoCnt=0;}
+      if((l==='複勝'||l.startsWith('複勝\t'))&&curRace){curRace._inFukusho=true;curRace._inTansho=false;curRace._fukushoCnt=0;}
       const tm=l.match(/^単勝[\t\s]+\d+[\t\s]+[\d,]+円[\t\s]+(\d+)番人気/);
       if(tm&&!curRace.pop1){curRace.pop1=parseInt(tm[1]);continue;}
       // 複勝から2着・3着人気を抽出（「X番人気」単独行）
