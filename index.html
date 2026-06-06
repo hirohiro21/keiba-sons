@@ -64,8 +64,8 @@ input[type=number]{background:var(--bg3);border:1px solid var(--bd2);border-radi
   <textarea id="ta" placeholder="れじまぐからコピーしたテキストをここに貼り付けてください"></textarea>
   <div style="display:flex;gap:8px;margin-top:8px;">
     <select id="targetR" style="background:var(--bg3);border:1px solid var(--bd2);border-radius:6px;color:var(--tx);padding:8px 10px;font-size:13px;">
-      <option value="12">11R予測（1R〜10Rを貼り付け）</option>
-      <option value="11">12R予測（1R〜11Rを貼り付け）</option>
+      <option value="11">11R予測（1R〜10Rを貼り付け）</option>
+      <option value="12">12R予測（1R〜11Rを貼り付け）</option>
     </select>
     <button class="btn btn-gold" style="margin:0;flex:1;" onclick="runPredict()">▶ 予想する</button>
   </div>
@@ -636,18 +636,84 @@ function getAxisCandidates(day,targetR,popMap={}){
     const baseScore = f.isPred ? (targetR===12?6:4) : 2;
     f.common.forEach(n=>add(n,f.label,baseScore));
   });
-  // 1R単独参照：12R予測時に1Rの馬番を最優先で反映（折り畳み候補）
+  // ===== 12R専用ロジック =====
   if(targetR===12){
+    // ①1R折り畳み候補（最優先）
     const r1=getRace(day,1);
-    if(r1){
-      r1.uma.forEach(u=>add(u,'1R折り畳み候補→12R',6));
-    }
-    // 2R↔11R連鎖馬番も12Rに反映
+    if(r1) r1.uma.forEach(u=>add(u,'1R折り畳み候補→12R',6));
+
+    // ②2R↔11R連鎖馬番
     const r2=getRace(day,2);
     const r11=getRace(day,11);
     if(r2&&r11){
-      const common2_11=r2.uma.filter(u=>r11.uma.includes(u));
-      common2_11.forEach(u=>add(u,'2R↔11R折り畳み→12R',5));
+      r2.uma.filter(u=>r11.uma.includes(u)).forEach(u=>add(u,'2R↔11R折り畳み→12R',5));
+    }
+
+    // ③枠番収束（5回→6回★）の枠の馬番にスコア加算
+    const fChain12=analyzeFrameChain(day,11);
+    Object.entries(fChain12.current).forEach(([f,cnt])=>{
+      if(cnt===5){
+        // 5回出現→6回目収束★ その枠の馬番を探してスコア加算
+        const fNum=parseInt(f);
+        for(let r=1;r<=11;r++){
+          const d=getRace(day,r);
+          if(!d)continue;
+          d.uma.forEach((u,i)=>{
+            if(d.frames[i]===fNum) add(u,`枠${fNum}収束★→12R`,3);
+          });
+        }
+      }
+    });
+
+    // ④3-6-9-12R兄弟レース連鎖（右列）
+    const brotherRaces12=[3,6,9]; // 12Rの兄弟レース
+    const umaIn369={};
+    brotherRaces12.forEach(r=>{
+      const d=getRace(day,r);
+      if(!d)return;
+      d.uma.slice(0,2).forEach(u=>{umaIn369[u]=(umaIn369[u]||0)+1;});
+    });
+    Object.entries(umaIn369).filter(([,c])=>c>=2).forEach(([u,c])=>{
+      add(Number(u),`3-6-9R兄弟連鎖(${c}回)→12R`,c*1.5);
+    });
+
+    // ⑤枠連の奇数→偶数収束から注目枠の馬番にスコア
+    const frameCnt12={1:0,2:0,3:0,4:0,5:0,6:0,7:0,8:0};
+    for(let r=1;r<=11;r++){
+      const d=getRace(day,r);
+      if(!d||!d.kura)continue;
+      d.kura.forEach(f=>{if(f>=1&&f<=8)frameCnt12[f]++;});
+    }
+    Object.entries(frameCnt12).forEach(([f,cnt])=>{
+      const fNum=parseInt(f);
+      // 奇数回出現→偶数回へ（3回→4回、5回→6回）
+      if(cnt===3||cnt===5){
+        for(let r=1;r<=11;r++){
+          const d=getRace(day,r);
+          if(!d)continue;
+          d.uma.forEach((u,i)=>{
+            if(d.frames[i]===fNum) add(u,`枠${fNum}奇数→偶数収束→12R`,1.5);
+          });
+        }
+      }
+    });
+
+    // ⑤-2 11Rスライドポイント（1・2・3着馬番を12Rに反映）
+    const r11slide=getRace(day,11);
+    if(r11slide){
+      r11slide.uma.forEach(u=>add(u,'11Rスライド→12R',2));
+    }
+
+    // ⑥頭数把握（STEP2の出走頭数から）
+    const headsEl=document.getElementById('r11heads');
+    const heads=headsEl?parseInt(headsEl.value)||0:0;
+    if(heads>0){
+      // 頭数が少ない（8頭以下）場合は上位人気馬のスコアを上げる
+      if(heads<=8&&Object.keys(popMap).length>0){
+        Object.entries(popMap).forEach(([u,p])=>{
+          if(p<=3) add(Number(u),'少頭数A群補正',1);
+        });
+      }
     }
   }
   brother.forEach(b=>{
@@ -675,14 +741,41 @@ function getAxisCandidates(day,targetR,popMap={}){
   });
   let sorted=Object.entries(cands).sort((a,b)=>b[1].score-a[1].score);
   if(Object.keys(popMap).length>0){
-  // B群フィルター削除：ロジックスコア上位2頭をそのまま返す（買い判断は人間が行う）
+    // A群（1-3番人気）：スコア+1.5
+    // B群（4-8番人気）：スコア+1.0
+    // C群（9番人気以降）：スコア変更なし
+    Object.entries(popMap).forEach(([uma,pop])=>{
+      const u=Number(uma);
+      const p=parseInt(pop);
+      if(!cands[u])return;
+      if(p>=1&&p<=3){cands[u].score+=1.5;cands[u].reasons.push('A群('+p+'番人気)+1.5');}
+      else if(p>=4&&p<=8){cands[u].score+=1.0;cands[u].reasons.push('B群('+p+'番人気)+1.0');}
+    });
+    sorted=Object.entries(cands).sort((a,b)=>b[1].score-a[1].score);
   }
+
+  // ===== 後半連鎖チェック（6R〜10R）=====
+  // 前のレースの1・2着馬番が次のレースに出ない状態が続く→馬番スコアを下げる
+  let noChainCount = 0;
+  for(let r=6; r<=Math.min(maxR-1, 9); r++){
+    const cur = getRace(day, r);
+    const nxt = getRace(day, r+1);
+    if(!cur || !nxt) continue;
+    const curTop2 = cur.uma.slice(0,2);
+    const nxtTop2 = nxt.uma.slice(0,2);
+    const hasChain = curTop2.some(u => nxtTop2.includes(u));
+    if(!hasChain) noChainCount++;
+  }
+  // 4回以上連鎖なし→馬番スコアを下げる
+  const chainCheckRaces = Math.min(maxR-1, 9) - 5; // チェック可能レース数
+  if(chainCheckRaces >= 2 && noChainCount >= chainCheckRaces * 0.7){
+    const penalty = 0.7; // 30%ダウン
+    sorted = sorted.map(([u,v])=>[u,{...v,score:Math.round(v.score*penalty*10)/10,reasons:[...v.reasons,'※後半連鎖なし→スコア調整']}]);
+    sorted.sort((a,b)=>b[1].score-a[1].score);
+  }
+
   return sorted.slice(0,2);
 }
-
-
-var simpleDay = null;
-var manualR = 10;
 
 function getRace(day,r){
   const race=day.races[r];
