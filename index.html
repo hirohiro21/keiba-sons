@@ -1070,8 +1070,7 @@ function analyzeFold(day,targetR){
     const uA=dA?dA.uma:[],uB=dB?dB.uma:[];
     const common=uA.filter(u=>uB.includes(u));
     const isPred=b===targetR;
-    // ★v15：12R予測時、2R↔11RはisRefから除外（11R予測馬番の混入防止）
-    const isRef=targetR===12&&b===11?false:(targetR===12&&b===11);
+    const isRef=isPred?false:(targetR===12&&b===11?true:false);
     return{label:labels[i],a,b,uA,uB,common,isPred,isRef};
   });
 }
@@ -1284,7 +1283,6 @@ function getAxisCandidates(day,targetR,popMap={}){
   const maxR=targetR-1;
   const fold=analyzeFold(day,targetR);
   const brother=analyzeBrother(day,maxR);
-  // ★12R予測時：馬番連鎖・馬連連続は10Rまで（11Rの影響除外）
   const chainMaxR=targetR===12?10:maxR;
   const chain=analyzeChain(day,chainMaxR);
   const mirror=analyzeMirror(day);
@@ -1296,22 +1294,46 @@ function getAxisCandidates(day,targetR,popMap={}){
     if(!cands[uma])cands[uma]={reasons:[],score:0};
     if(!cands[uma].reasons.includes(reason)){cands[uma].reasons.push(reason);cands[uma].score+=score;}
   };
-  fold.filter(f=>(f.isPred||f.isRef)&&f.common.length).forEach(f=>f.common.forEach(n=>add(n,f.label,f.isPred?3:1.5)));
+  // v24ロジックと完全統一
+  fold.filter(f=>(f.isPred||f.isRef)&&f.common.length).forEach(f=>{
+    const baseScore=f.isPred?(targetR===12?6:4):2;
+    f.common.forEach(n=>add(n,f.label,baseScore));
+  });
+  // ===== 12R専用ロジック =====
+  if(targetR===12){
+    const r1=getRace(day,1);
+    if(r1)r1.uma.forEach(u=>add(u,'1R折り畳み候補→12R',6));
+    const r2=getRace(day,2),r11=getRace(day,11);
+    if(r2&&r11){r2.uma.filter(u=>r11.uma.includes(u)).forEach(u=>add(u,'2R↔11R折り畳み→12R',5));}
+    const fChain12=analyzeFrameChain(day,11);
+    Object.entries(fChain12.current).forEach(([f,cnt])=>{
+      if(cnt===5){
+        const fNum=parseInt(f);
+        for(let r=1;r<=11;r++){const d=getRace(day,r);if(!d)continue;d.uma.forEach((u,i)=>{if(d.frames[i]===fNum)add(u,`枠${fNum}収束★→12R`,3);});}
+      }
+    });
+    const umaIn369={};
+    [3,6,9].forEach(r=>{const d=getRace(day,r);if(!d)return;d.uma.slice(0,2).forEach(u=>{umaIn369[u]=(umaIn369[u]||0)+1;});});
+    Object.entries(umaIn369).filter(([,c])=>c>=2).forEach(([u,c])=>add(Number(u),`3-6-9R兄弟連鎖(${c}回)→12R`,c*1.5));
+    const frameCnt12={1:0,2:0,3:0,4:0,5:0,6:0,7:0,8:0};
+    for(let r=1;r<=11;r++){const d=getRace(day,r);if(!d||!d.kura)continue;d.kura.forEach(f=>{if(f>=1&&f<=8)frameCnt12[f]++;});}
+    Object.entries(frameCnt12).forEach(([f,cnt])=>{
+      const fNum=parseInt(f);
+      if(cnt===3||cnt===5){for(let r=1;r<=11;r++){const d=getRace(day,r);if(!d)continue;d.uma.forEach((u,i)=>{if(d.frames[i]===fNum)add(u,`枠${fNum}奇数→偶数収束→12R`,1.5);});}}
+    });
+    const r11slide=getRace(day,11);
+    if(r11slide){r11slide.uma.forEach(u=>add(u,'11Rスライド→12R',2));}
+  }
   brother.forEach(b=>{
     b.chains.forEach(c=>{
-      // ★12R予測時：11Rが含まれる兄弟連鎖はスコアを0.5倍に抑える
       const has11R=(c.rA===11||c.rB===11)&&targetR===12;
       const baseScore=c.rB>=7?2.5:1.5;
-      const score=has11R?baseScore*0.5:baseScore;
+      const score=has11R?baseScore*0.3:baseScore;
       c.common.forEach(u=>add(u,`兄弟連鎖(${b.name} ${c.rA}R↔${c.rB}R)`,score));
     });
-    // ★12R予測時：11Rを除いた兄弟レースのみでrecurringを計算
     const recurringRaces=targetR===12?b.avail.filter(r=>r!==11):b.avail;
     const countMap12={};
-    recurringRaces.forEach(r=>{
-      const d=getRace(day,r);if(!d)return;
-      d.uma.forEach(u=>{countMap12[u]=(countMap12[u]||0)+1;});
-    });
+    recurringRaces.forEach(r=>{const d=getRace(day,r);if(!d)return;d.uma.forEach(u=>{countMap12[u]=(countMap12[u]||0)+1;});});
     Object.entries(countMap12).filter(([,c])=>c>=2).forEach(([u,c])=>add(Number(u),`兄弟${c}回出現(${b.name})`,1));
   });
   chain.signals.forEach(s=>add(s.uma,`馬番連鎖(${s.type})`,1.5));
@@ -1321,8 +1343,18 @@ function getAxisCandidates(day,targetR,popMap={}){
     else add(a.uma,`馬連馬番${a.uma}:2連続→次注目`,1);
   });
   let sorted=Object.entries(cands).sort((a,b)=>b[1].score-a[1].score);
-  if(Object.keys(popMap).length>0){
-  // B群フィルター削除：ロジックスコア上位2頭をそのまま返す（買い判断は人間が行う）
+  // 後半連鎖チェック
+  let noChainCount=0;
+  for(let r=6;r<=Math.min(maxR-1,9);r++){
+    const cur=getRace(day,r),nxt=getRace(day,r+1);
+    if(!cur||!nxt)continue;
+    if(!cur.uma.slice(0,2).some(u=>nxt.uma.slice(0,2).includes(u)))noChainCount++;
+  }
+  const chainCheckRaces=Math.min(maxR-1,9)-5;
+  if(chainCheckRaces>=2&&noChainCount>=chainCheckRaces*0.7){
+    const penalty=0.7;
+    sorted=sorted.map(([u,v])=>[u,{...v,score:Math.round(v.score*penalty*10)/10}]);
+    sorted.sort((a,b)=>b[1].score-a[1].score);
   }
   return sorted.slice(0,2);
 }
